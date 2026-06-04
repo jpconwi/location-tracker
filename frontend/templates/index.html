@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>LocationTrack — Sign In</title>
+  <link rel="stylesheet" href="/static/css/style.css"/>
+  <style>
+    body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+
+    .auth-wrap {
+      width: 100%; max-width: 420px; padding: 1.5rem;
+    }
+
+    .brand {
+      text-align: center; margin-bottom: 2.5rem;
+    }
+    .brand-logo {
+      font-size: 2.5rem; line-height: 1;
+      margin-bottom: 0.5rem;
+    }
+    .brand-name {
+      font-size: 1.5rem; font-weight: 800; letter-spacing: 0.04em;
+      color: var(--accent);
+    }
+    .brand-name span { color: var(--text); }
+    .brand-tagline {
+      font-size: 0.8rem; color: var(--text-dim); margin-top: 0.3rem;
+      font-family: 'Space Mono', monospace;
+    }
+
+    .tabs {
+      display: flex; gap: 0; margin-bottom: 1.5rem;
+      border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+    }
+    .tab-btn {
+      flex: 1; padding: 0.6rem; background: transparent; border: none;
+      color: var(--text-dim); font-family: 'Syne', sans-serif;
+      font-size: 0.85rem; font-weight: 700; letter-spacing: 0.05em;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .tab-btn.active { background: var(--accent); color: var(--bg); }
+
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    .admin-toggle {
+      margin-top: 0.75rem; padding: 0.6rem; border-radius: 6px;
+      background: rgba(124,58,237,0.08); border: 1px solid rgba(124,58,237,0.3);
+      font-size: 0.78rem; color: #a78bfa;
+    }
+    .admin-toggle summary { cursor: pointer; font-weight: 700; }
+    .admin-toggle .form-input { margin-top: 0.5rem; }
+
+    .grid-bg {
+      position: fixed; inset: 0; z-index: -1; pointer-events: none;
+      background-image: linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px),
+                        linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+    .glow {
+      position: fixed; top: -150px; left: 50%; transform: translateX(-50%);
+      width: 600px; height: 400px; z-index: -1; pointer-events: none;
+      background: radial-gradient(ellipse, rgba(0,212,255,0.08) 0%, transparent 70%);
+    }
+  </style>
+</head>
+<body>
+  <div class="grid-bg"></div>
+  <div class="glow"></div>
+
+  <div class="auth-wrap">
+    <div class="brand">
+      <div class="brand-logo">📍</div>
+      <div class="brand-name">Location<span>Track</span></div>
+      <div class="brand-tagline">Real-time location sharing & tracking</div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchAuthTab('login', this)">Sign In</button>
+      <button class="tab-btn" onclick="switchAuthTab('register', this)">Register</button>
+    </div>
+
+    <!-- Login -->
+    <div id="panel-login" class="panel active">
+      <div class="card">
+        <div class="form-group">
+          <label class="form-label">Username</label>
+          <input id="login-username" class="form-input" type="text" placeholder="your_username" autocomplete="username"/>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input id="login-password" class="form-input" type="password" placeholder="••••••••" autocomplete="current-password"/>
+        </div>
+        <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Sign In →</button>
+        <div id="login-alert" class="alert alert-error"></div>
+      </div>
+    </div>
+
+    <!-- Register -->
+    <div id="panel-register" class="panel">
+      <div class="card">
+        <div class="form-group">
+          <label class="form-label">Username</label>
+          <input id="reg-username" class="form-input" type="text" placeholder="choose_a_name" autocomplete="username"/>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input id="reg-password" class="form-input" type="password" placeholder="••••••••" autocomplete="new-password"/>
+        </div>
+        <details class="admin-toggle">
+          <summary>🔐 Admin Registration (optional)</summary>
+          <input id="reg-admin" class="form-input" type="password" placeholder="Admin code"/>
+        </details>
+        <button class="btn btn-success mt-2" style="width:100%" onclick="doRegister()">Create Account →</button>
+        <div id="reg-alert" class="alert alert-error"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/auth.js"></script>
+  <script>
+    // Redirect if already logged in
+    if (Auth.token()) window.location.href = '/map';
+
+    function switchAuthTab(name, btn) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('panel-' + name).classList.add('active');
+    }
+
+    async function doLogin() {
+      const username = document.getElementById('login-username').value.trim();
+      const password = document.getElementById('login-password').value;
+      const alert = document.getElementById('login-alert');
+      alert.classList.remove('show');
+      if (!username || !password) { alert.textContent = 'Fill in all fields'; alert.classList.add('show'); return; }
+      try {
+        const data = await Auth.request('POST', '/api/auth/login', { username, password });
+        Auth.save(data);
+        window.location.href = '/map';
+      } catch (e) {
+        alert.textContent = e.message;
+        alert.classList.add('show');
+      }
+    }
+
+    async function doRegister() {
+      const username = document.getElementById('reg-username').value.trim();
+      const password = document.getElementById('reg-password').value;
+      const admin_code = document.getElementById('reg-admin').value;
+      const alert = document.getElementById('reg-alert');
+      alert.classList.remove('show');
+      if (!username || !password) { alert.textContent = 'Fill in all fields'; alert.classList.add('show'); return; }
+      try {
+        const data = await Auth.request('POST', `/api/auth/register?admin_code=${encodeURIComponent(admin_code)}`, { username, password });
+        Auth.save(data);
+        window.location.href = '/map';
+      } catch (e) {
+        alert.textContent = e.message;
+        alert.classList.add('show');
+      }
+    }
+
+    // Enter key support
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        if (document.getElementById('panel-login').classList.contains('active')) doLogin();
+        else doRegister();
+      }
+    });
+  </script>
+</body>
+</html>

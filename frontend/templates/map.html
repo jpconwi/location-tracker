@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>LocationTrack — Live Map</title>
+  <link rel="stylesheet" href="/static/css/style.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    body { overflow: hidden; }
+    .page { padding-top: 60px; height: 100vh; display: flex; }
+
+    /* ── Left sidebar ── */
+    .sidebar {
+      width: 300px; min-width: 300px;
+      display: flex; flex-direction: column;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      overflow: hidden;
+      z-index: 500;
+    }
+    .sidebar-top {
+      padding: 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-section {
+      padding: 0.75rem 1rem;
+      font-size: 0.68rem; font-weight: 700;
+      letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-scroll { flex: 1; overflow-y: auto; }
+
+    /* ── Check-in box ── */
+    .checkin-box { display: flex; flex-direction: column; gap: 0.5rem; }
+    #btn-checkin {
+      width: 100%; justify-content: center;
+      font-size: 0.9rem; padding: 0.7rem;
+    }
+    #checkin-label { font-size: 0.82rem; }
+
+    /* ── Map area ── */
+    .map-wrap { flex: 1; position: relative; }
+    #map { width: 100%; height: 100%; }
+
+    /* ── Right panel ── */
+    .right-panel {
+      width: 260px; min-width: 260px;
+      display: flex; flex-direction: column;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      overflow: hidden;
+      z-index: 500;
+    }
+    .right-panel-top {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.68rem; font-weight: 700;
+      letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--text-dim);
+    }
+
+    /* ── Distance panel ── */
+    #distance-panel {
+      display: none;
+      margin: 0.75rem;
+      padding: 0.75rem;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    #distance-panel .dp-title {
+      font-size: 0.68rem; font-weight: 700; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--text-dim); margin-bottom: 0.5rem;
+    }
+    #distance-panel .dp-route {
+      font-size: 0.78rem; color: var(--text-dim); margin-bottom: 0.4rem;
+      font-family: 'Space Mono', monospace;
+    }
+    #dist-km {
+      font-size: 1.6rem; font-weight: 800;
+      color: var(--warn); font-family: 'Space Mono', monospace;
+    }
+    .dp-close {
+      background: none; border: none; color: var(--text-dim);
+      cursor: pointer; font-size: 0.75rem; margin-top: 0.4rem;
+      display: block; text-align: right;
+    }
+    .dp-close:hover { color: var(--danger); }
+
+    /* ── History panel ── */
+    #history-list { padding: 0 0.75rem; }
+
+    /* ── Reload btn ── */
+    .reload-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 0.5rem 1rem; border-bottom: 1px solid var(--border);
+    }
+    .reload-row span { font-size: 0.72rem; color: var(--text-dim); font-family: monospace; }
+
+    /* ── Mobile ── */
+    @media (max-width: 768px) {
+      .sidebar { width: 240px; min-width: 240px; }
+      .right-panel { display: none; }
+    }
+    @media (max-width: 560px) {
+      .sidebar { position: absolute; left: 0; top: 60px; bottom: 0; z-index: 600;
+        transform: translateX(-100%); transition: transform 0.3s; }
+      .sidebar.open { transform: none; }
+      .map-wrap { width: 100%; }
+      #toggle-sidebar {
+        display: flex !important;
+        position: absolute; top: 70px; left: 10px; z-index: 700;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Navbar -->
+<nav class="navbar">
+  <a href="/map" class="navbar-brand">📍 <span>Location</span>Track</a>
+  <div class="navbar-links">
+    <a href="/map" class="active">Map</a>
+    <a href="/admin" id="nav-admin" style="display:none;color:#a78bfa">Admin</a>
+    <a href="#" onclick="Auth.logout()">Sign Out</a>
+  </div>
+  <div class="navbar-user" id="navbar-user"></div>
+</nav>
+
+<button id="toggle-sidebar" class="btn btn-outline" style="display:none"
+  onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
+
+<div class="page">
+
+  <!-- Left Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-top">
+      <div class="checkin-box">
+        <input id="checkin-label" class="form-input" type="text"
+          placeholder="Optional label (e.g. Home, Work…)"/>
+        <button id="btn-checkin" class="btn btn-success" onclick="doCheckin()">
+          📍 Check In Here
+        </button>
+      </div>
+    </div>
+
+    <div class="reload-row">
+      <div class="sidebar-section" style="border:none;padding:0">Online Users</div>
+      <button class="btn btn-outline" onclick="loadLiveMap()"
+        style="padding:0.25rem 0.6rem;font-size:0.72rem">↻ Refresh</button>
+    </div>
+
+    <div class="sidebar-scroll">
+      <div id="user-list" style="padding:0.25rem 0">
+        <div style="padding:1rem;color:var(--text-dim);font-size:0.82rem">Loading…</div>
+      </div>
+    </div>
+
+    <div class="sidebar-section" style="cursor:pointer" onclick="toggleHistory()">
+      My History ▾
+    </div>
+    <div id="history-list" style="max-height:200px;overflow-y:auto;padding:0.5rem 1rem"></div>
+  </aside>
+
+  <!-- Map -->
+  <div class="map-wrap">
+    <div id="map"></div>
+  </div>
+
+  <!-- Right Panel -->
+  <aside class="right-panel">
+    <div class="right-panel-top">📏 Distance Tool</div>
+
+    <div style="padding:0.75rem;font-size:0.8rem;color:var(--text-dim);line-height:1.5">
+      Click <strong style="color:var(--accent)">Measure Distance</strong> on any user's
+      map pin to calculate distance from your last check-in.
+    </div>
+
+    <div id="distance-panel">
+      <div class="dp-title">📏 Estimated Distance</div>
+      <div class="dp-route">
+        <span id="dist-from">You</span> → <span id="dist-to">User</span>
+      </div>
+      <div id="dist-km">—</div>
+      <button class="dp-close" onclick="closeDist()">✕ Clear</button>
+    </div>
+
+    <div style="padding:0.75rem;border-top:1px solid var(--border);margin-top:auto">
+      <div style="font-size:0.68rem;color:var(--text-dim);letter-spacing:0.1em;
+        text-transform:uppercase;margin-bottom:0.5rem">Manual Distance</div>
+      <div style="display:flex;flex-direction:column;gap:0.5rem">
+        <input id="man-lat1" class="form-input" type="number" step="any" placeholder="Lat 1"/>
+        <input id="man-lon1" class="form-input" type="number" step="any" placeholder="Lon 1"/>
+        <input id="man-lat2" class="form-input" type="number" step="any" placeholder="Lat 2"/>
+        <input id="man-lon2" class="form-input" type="number" step="any" placeholder="Lon 2"/>
+        <button class="btn btn-primary" onclick="manualDist()" style="width:100%">Calculate</button>
+      </div>
+    </div>
+  </aside>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/static/js/auth.js"></script>
+<script src="/static/js/map.js"></script>
+<script>
+  requireAuth();
+  initNavbar();
+  initMap();
+  loadLiveMap();
+  loadHistory();
+
+  // Auto-refresh every 30s
+  setInterval(loadLiveMap, 30000);
+
+  function toggleHistory() {
+    const el = document.getElementById('history-list');
+    el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  }
+
+  function closeDist() {
+    document.getElementById('distance-panel').style.display = 'none';
+    if (distanceLine) { map.removeLayer(distanceLine); distanceLine = null; }
+  }
+
+  async function manualDist() {
+    const lat1 = parseFloat(document.getElementById('man-lat1').value);
+    const lon1 = parseFloat(document.getElementById('man-lon1').value);
+    const lat2 = parseFloat(document.getElementById('man-lat2').value);
+    const lon2 = parseFloat(document.getElementById('man-lon2').value);
+    if ([lat1,lon1,lat2,lon2].some(isNaN)) { showToast('Enter valid coordinates', 'error'); return; }
+    await calcAndShowDistance(lat1, lon1, lat2, lon2, 'Point A', 'Point B');
+  }
+</script>
+</body>
+</html>
