@@ -4,7 +4,15 @@ Pure-Python FastAPI app for Vercel.
 Turso accessed via HTTP REST API (no native libsql-client).
 All HTML inlined to avoid filesystem path issues on Vercel.
 """
-import os, math, json
+import os, math, json, logging, warnings
+
+# ── Silence passlib/bcrypt version-mismatch warning ──────────────────────────
+# passlib 1.7.4 tries to read bcrypt.__about__.__version__ which doesn't exist
+# in bcrypt 4.x. This is cosmetic only — bcrypt still works fine.
+logging.getLogger("passlib").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", ".*error reading bcrypt version.*")
+# ─────────────────────────────────────────────────────────────────────────────
+
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Optional
