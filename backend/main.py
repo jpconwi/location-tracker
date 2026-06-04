@@ -1,9 +1,19 @@
 """
 main.py — FastAPI application entry point
 """
+import sys
 import os
+
+# ── Fix Vercel import paths ──────────────────────────────────────────────────
+# Vercel runs from /var/task (repo root), so we add backend/ to sys.path
+# so that `from config.x import y` works correctly.
+_backend_dir = os.path.dirname(os.path.abspath(__file__))
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+# ─────────────────────────────────────────────────────────────────────────────
+
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -29,9 +39,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files
-static_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "static")
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+# Static files — path relative to THIS file (backend/main.py)
+_root = os.path.dirname(_backend_dir)          # repo root
+_static_dir = os.path.join(_root, "frontend", "static")
+app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 # API routers
 app.include_router(auth_router)
