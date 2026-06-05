@@ -3,15 +3,16 @@ LocationTrack — api/index.py
 Pure-Python FastAPI app for Vercel.
 Turso accessed via HTTP REST API (no native libsql-client).
 All HTML inlined to avoid filesystem path issues on Vercel.
+
+FIXES:
+  - Turso 400: args now uses correct typed-value format for all params
+  - Real-time GPS: navigator.geolocation.watchPosition() auto-tracks movement
+  - Distance shown live: each user sees km from themselves to others
 """
 import os, math, json, logging, warnings
 
-# ── Silence passlib/bcrypt version-mismatch warning ──────────────────────────
-# passlib 1.7.4 tries to read bcrypt.__about__.__version__ which doesn't exist
-# in bcrypt 4.x. This is cosmetic only — bcrypt still works fine.
 logging.getLogger("passlib").setLevel(logging.ERROR)
 warnings.filterwarnings("ignore", ".*error reading bcrypt version.*")
-# ─────────────────────────────────────────────────────────────────────────────
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -40,27 +41,42 @@ ALGORITHM           = "HS256"
 TOKEN_TTL_MIN       = 60 * 24 * 7
 
 # ═══════════════════════════════════════════════════
-#  TURSO HTTP CLIENT  (replaces libsql-client)
+#  TURSO HTTP CLIENT  — FIX: correct typed-value args
 # ═══════════════════════════════════════════════════
+def _make_arg(v):
+    """Convert a Python value to a Turso typed-value dict."""
+    if v is None:
+        return {"type": "null", "value": None}
+    if isinstance(v, bool):
+        return {"type": "integer", "value": str(int(v))}
+    if isinstance(v, int):
+        return {"type": "integer", "value": str(v)}
+    if isinstance(v, float):
+        return {"type": "float", "value": str(v)}
+    return {"type": "text", "value": str(v)}
+
 async def turso(statements: list) -> list:
-    """
-    Execute one or more SQL statements via Turso HTTP API.
-    statements = [{"q": "SELECT ...", "params": [...]}]
-    Returns list of result dicts.
-    """
     url = f"{TURSO_URL}/v2/pipeline"
-    requests = [{"type": "execute", "stmt": {"sql": s["q"], "args": [
-        {"type": _turso_type(v), "value": str(v) if v is not None else None}
-        for v in s.get("params", [])
-    ]}} for s in statements]
+    requests = [
+        {
+            "type": "execute",
+            "stmt": {
+                "sql": s["q"],
+                "args": [_make_arg(v) for v in s.get("params", [])]
+            }
+        }
+        for s in statements
+    ]
     requests.append({"type": "close"})
 
     async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(url,
+        r = await client.post(
+            url,
             headers={"Authorization": f"Bearer {TURSO_TOKEN}", "Content-Type": "application/json"},
             json={"requests": requests}
         )
-        r.raise_for_status()
+        if not r.is_success:
+            raise HTTPException(502, f"Turso HTTP {r.status_code}: {r.text[:300]}")
         data = r.json()
 
     results = []
@@ -72,17 +88,11 @@ async def turso(statements: list) -> list:
             results.append({"cols": cols, "rows": rows,
                              "last_insert_rowid": rs.get("last_insert_rowid")})
         else:
-            raise HTTPException(500, f"Turso error: {item}")
+            err = item.get("error", {})
+            raise HTTPException(500, f"Turso error: {err.get('message', item)}")
     return results
 
-def _turso_type(v):
-    if v is None:     return "null"
-    if isinstance(v, int):   return "integer"
-    if isinstance(v, float): return "float"
-    return "text"
-
 async def q1(sql: str, params: list = []) -> dict:
-    """Execute a single statement and return its result."""
     results = await turso([{"q": sql, "params": params}])
     return results[0] if results else {"cols": [], "rows": []}
 
@@ -179,13 +189,6 @@ async def ctrl_login(username, password):
     user = {"id": int(row[0]), "username": row[1], "is_admin": bool(int(row[3] or 0)), "created_at": row[4]}
     return {"access_token": make_token(user["id"]), "token_type": "bearer", "user": user}
 
-def _row_to_checkin(row, username=None):
-    return {"id": int(row[0]), "user_id": int(row[1]), "username": username or row[2],
-            "latitude": float(row[3] if username else row[3]),
-            "longitude": float(row[4] if username else row[4]),
-            "label": row[5] if username else row[5],
-            "checked_at": row[6] if username else row[6]}
-
 async def ctrl_checkin(user_id, lat, lon, label=None):
     r = await q1("INSERT INTO checkins (user_id,latitude,longitude,label) VALUES (?,?,?,?)",
                  [user_id, lat, lon, label])
@@ -244,7 +247,7 @@ def haversine(lat1, lon1, lat2, lon2):
     return {"km": round(km, 3), "meters": round(km * 1000, 1)}
 
 # ═══════════════════════════════════════════════════
-#  HTML PAGES  (inlined — no filesystem reads)
+#  SHARED CSS
 # ═══════════════════════════════════════════════════
 CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap');
@@ -286,6 +289,13 @@ html,body{height:100%;background:var(--bg);color:var(--tx);font-family:'Syne',sa
 .spin{width:16px;height:16px;border:2px solid rgba(0,212,255,.25);border-top-color:var(--ac);border-radius:50%;animation:sp .7s linear infinite;display:inline-block}
 @keyframes sp{to{transform:rotate(360deg)}}
 .mt1{margin-top:.5rem}.mt2{margin-top:1rem}.mt3{margin-top:1.5rem}
+/* GPS status pill */
+.gps-pill{display:inline-flex;align-items:center;gap:.35rem;padding:.28rem .6rem;border-radius:20px;font-size:.68rem;font-weight:700;letter-spacing:.06em;border:1px solid var(--bd);background:var(--sf2);transition:all .3s}
+.gps-pill.active{border-color:var(--ok);color:var(--ok);background:rgba(16,185,129,.08)}
+.gps-pill.error{border-color:var(--err);color:#fca5a5}
+.gps-pill.searching{border-color:var(--warn);color:var(--warn)}
+.gps-dot{width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse 1.4s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 """
 
 JS_AUTH = """
@@ -320,68 +330,141 @@ function initNav(){
 }
 """
 
+# ═══════════════════════════════════════════════════
+#  MAP JS — real-time GPS tracking
+# ═══════════════════════════════════════════════════
 JS_MAP = """
-let map, markers={}, distLine=null;
+let map, markers={}, distLine=null, myLat=null, myLon=null;
+let watchId=null, trackingActive=false, lastSentLat=null, lastSentLon=null;
+const MIN_MOVE_M = 10; // only push update if moved ≥ 10 m
+
 function initMap(){
   map = L.map('map',{zoomControl:false}).setView([13,122],6);
   L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
     attribution:'© OpenStreetMap © CARTO', maxZoom:19}).addTo(map);
   L.control.zoom({position:'bottomright'}).addTo(map);
 }
-function mkIcon(color='#00d4ff', label=''){
-  const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="40" viewBox="0 0 32 40">
-    <path d="M16 0C7.16 0 0 7.16 0 16c0 12 16 24 16 24S32 28 32 16C32 7.16 24.84 0 16 0z" fill="${color}" opacity=".9"/>
-    <circle cx="16" cy="16" r="7" fill="white" opacity=".9"/>
-    <text x="16" y="20" text-anchor="middle" fill="${color}" font-size="8" font-family="Syne,sans-serif" font-weight="700">${label.slice(0,2).toUpperCase()}</text>
+
+function mkIcon(color='#00d4ff', label='', isLive=false){
+  const ring = isLive ? `<circle cx="16" cy="16" r="14" fill="none" stroke="${color}" stroke-width="2" opacity="0.4"><animate attributeName="r" from="10" to="18" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" from="0.6" to="0" dur="2s" repeatCount="indefinite"/></circle>` : '';
+  const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="36" height="44" viewBox="0 0 36 44">
+    ${ring}
+    <path d="M18 0C8.06 0 0 8.06 0 18c0 13.5 18 26 18 26S36 31.5 36 18C36 8.06 27.94 0 18 0z" fill="${color}" opacity=".92"/>
+    <circle cx="18" cy="18" r="8" fill="white" opacity=".88"/>
+    <text x="18" y="22" text-anchor="middle" fill="${color}" font-size="8" font-family="Syne,sans-serif" font-weight="700">${label.slice(0,2).toUpperCase()}</text>
   </svg>`;
-  return L.divIcon({html:svg,iconSize:[32,40],iconAnchor:[16,40],popupAnchor:[0,-40],className:''});
+  return L.divIcon({html:svg,iconSize:[36,44],iconAnchor:[18,44],popupAnchor:[0,-44],className:''});
 }
+
+// haversine in JS for client-side distance computation
+function hav(lat1,lon1,lat2,lon2){
+  const R=6371000,toR=Math.PI/180;
+  const dLat=(lat2-lat1)*toR, dLon=(lon2-lon1)*toR;
+  const a=Math.sin(dLat/2)**2+Math.cos(lat1*toR)*Math.cos(lat2*toR)*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+function fmtDist(m){
+  if(m<1000) return m.toFixed(0)+' m';
+  return (m/1000).toFixed(2)+' km';
+}
+
+// ── Real-time GPS tracking ────────────────────────
+function setGpsStatus(state, msg=''){
+  const pill = document.getElementById('gps-pill');
+  if(!pill) return;
+  pill.className = 'gps-pill '+state;
+  const labels = {active:'● LIVE', searching:'◌ Searching…', error:'✕ GPS Off'};
+  pill.innerHTML = `<span class="gps-dot"></span>${labels[state]||state}${msg?' — '+msg:''}`;
+}
+
+async function pushLocation(lat, lon, label=null){
+  try{
+    await Auth.req('POST','/api/checkins/',{latitude:lat,longitude:lon,label});
+    lastSentLat=lat; lastSentLon=lon;
+  }catch(e){ console.warn('Push failed:',e.message); }
+}
+
+function startTracking(){
+  if(!navigator.geolocation){ toast('Geolocation not supported','e'); return; }
+  setGpsStatus('searching');
+  watchId = navigator.geolocation.watchPosition(
+    async pos => {
+      const {latitude:lat, longitude:lon, accuracy} = pos.coords;
+      myLat=lat; myLon=lon;
+      trackingActive=true;
+      setGpsStatus('active');
+      // update my marker immediately on client
+      updateMyMarker(lat,lon);
+      // push to server only if moved meaningfully OR first time
+      const moved = lastSentLat===null || hav(lastSentLat,lastSentLon,lat,lon) >= MIN_MOVE_M;
+      if(moved) await pushLocation(lat,lon);
+    },
+    err => {
+      setGpsStatus('error', err.code===1?'Permission denied':'Unavailable');
+      toast('GPS: '+err.message,'e');
+    },
+    {enableHighAccuracy:true, maximumAge:3000, timeout:15000}
+  );
+}
+
+function stopTracking(){
+  if(watchId!==null){ navigator.geolocation.clearWatch(watchId); watchId=null; }
+  trackingActive=false;
+  setGpsStatus('error','Stopped');
+}
+
+function toggleTracking(){
+  const btn = document.getElementById('btn-track');
+  if(trackingActive){ stopTracking(); btn.textContent='▶ Start Tracking'; btn.className='btn bp'; }
+  else { startTracking(); btn.textContent='⏹ Stop Tracking'; btn.className='btn bd2'; }
+}
+
+function updateMyMarker(lat,lon){
+  const me = Auth.user();
+  if(!me) return;
+  if(markers[me.id]) map.removeLayer(markers[me.id]);
+  markers[me.id] = L.marker([lat,lon],{icon:mkIcon('#10b981',me.username,true)})
+    .addTo(map)
+    .bindPopup(`<div style="min-width:155px">
+      <div style="font-weight:800;font-size:1rem;margin-bottom:3px">${me.username} <span style="color:#10b981">(you)</span></div>
+      <div style="font-family:monospace;font-size:.68rem;color:#64748b">${lat.toFixed(5)}, ${lon.toFixed(5)}</div>
+      <div style="color:#10b981;font-size:.72rem;margin-top:5px">📡 Live tracking active</div>
+    </div>`);
+}
+
+// ── Load all users from server ────────────────────
 async function loadLive(){
   try{
     const cs = await Auth.req('GET','/api/checkins/live');
     const me = Auth.user();
-    Object.values(markers).forEach(m=>map.removeLayer(m)); markers={};
+    // remove non-me markers (me marker is managed by GPS watch)
+    Object.entries(markers).forEach(([uid,m])=>{ if(parseInt(uid)!==me?.id) map.removeLayer(m); });
     cs.forEach(c=>{
-      const isMe = c.user_id===me?.id, color=isMe?'#10b981':'#00d4ff';
+      if(c.user_id===me?.id) return; // my marker handled by GPS
       const time = new Date(c.checked_at+'Z').toLocaleString();
-      const m = L.marker([c.latitude,c.longitude],{icon:mkIcon(color,c.username)}).addTo(map)
-        .bindPopup(`<div style="min-width:155px">
+      const distTxt = (myLat!==null) ? fmtDist(hav(myLat,myLon,c.latitude,c.longitude)) : '—';
+      const m = L.marker([c.latitude,c.longitude],{icon:mkIcon('#00d4ff',c.username)}).addTo(map)
+        .bindPopup(`<div style="min-width:165px">
           <div style="font-weight:800;font-size:1rem;margin-bottom:3px">${c.username}</div>
           ${c.label?`<div style="color:#94a3b8;font-size:.78rem;margin-bottom:3px">📍 ${c.label}</div>`:''}
           <div style="font-family:monospace;font-size:.68rem;color:#64748b">${time}</div>
-          <div style="font-family:monospace;font-size:.67rem;color:#64748b;margin-top:3px">${c.latitude.toFixed(5)}, ${c.longitude.toFixed(5)}</div>
-          ${!isMe?`<button onclick="pickDist(${c.latitude},${c.longitude},'${c.username}')"
+          <div style="font-family:monospace;font-size:.67rem;color:#64748b;margin-top:2px">${c.latitude.toFixed(5)}, ${c.longitude.toFixed(5)}</div>
+          <div style="margin-top:6px;padding:4px 8px;background:rgba(0,212,255,.08);border-radius:5px;font-size:.76rem">
+            📏 <strong style="color:var(--warn)">${distTxt}</strong> from you
+          </div>
+          <button onclick="pickDist(${c.latitude},${c.longitude},'${c.username}')"
             style="margin-top:7px;padding:3px 9px;background:#00d4ff;color:#0a0e1a;border:none;border-radius:4px;font-size:.72rem;font-weight:700;cursor:pointer">
-            📏 Measure Distance</button>`:`<div style="color:#10b981;font-size:.72rem;margin-top:5px">▶ YOU</div>`}
+            📏 Measure Distance</button>
         </div>`);
       markers[c.user_id]=m;
     });
     updateUserList(cs);
   }catch(e){ toast('Map load failed: '+e.message,'e'); }
 }
-async function doCheckin(){
-  const btn=document.getElementById('btn-ci');
-  const label=document.getElementById('ci-label')?.value.trim()||null;
-  btn.disabled=true; btn.innerHTML='<span class="spin"></span> Locating…';
-  navigator.geolocation.getCurrentPosition(async pos=>{
-    const {latitude:lat,longitude:lon}=pos.coords;
-    try{
-      const r=await Auth.req('POST','/api/checkins/',{latitude:lat,longitude:lon,label});
-      toast(`✅ Checked in at ${lat.toFixed(4)}, ${lon.toFixed(4)}`,'s');
-      map.flyTo([lat,lon],15,{animate:true,duration:1.2});
-      if(markers[r.user_id]) map.removeLayer(markers[r.user_id]);
-      markers[r.user_id]=L.marker([lat,lon],{icon:mkIcon('#10b981',r.username)}).addTo(map)
-        .bindPopup(`<div><strong>${r.username}</strong><br><span style="color:#6ee7b7">📍 Just checked in</span></div>`).openPopup();
-      await loadLive();
-    }catch(e){ toast('Check-in failed: '+e.message,'e'); }
-    btn.disabled=false; btn.innerHTML='📍 Check In Here';
-  },err=>{ toast('Location denied: '+err.message,'e'); btn.disabled=false; btn.innerHTML='📍 Check In Here'; },{enableHighAccuracy:true});
-}
+
 async function pickDist(lat,lon,name){
-  const me=Auth.user(); const mm=markers[me?.id];
-  if(!mm){toast('Check in first!','e');return;}
-  const ll=mm.getLatLng();
-  await calcDist(ll.lat,ll.lng,lat,lon,'You',name);
+  if(myLat===null){toast('Enable tracking first!','e');return;}
+  await calcDist(myLat,myLon,lat,lon,'You',name);
 }
 async function calcDist(lat1,lon1,lat2,lon2,nA='A',nB='B'){
   try{
@@ -398,17 +481,20 @@ async function calcDist(lat1,lon1,lat2,lon2,nA='A',nB='B'){
     }
   }catch(e){toast('Distance calc failed','e');}
 }
+
 function updateUserList(cs){
   const el=document.getElementById('user-list'); if(!el)return;
   const me=Auth.user();
   el.innerHTML=cs.map(c=>{
     const isMe=c.user_id===me?.id;
+    const distTxt = (!isMe && myLat!==null) ? fmtDist(hav(myLat,myLon,c.latitude,c.longitude)) : '';
     return `<div onclick="flyTo(${c.user_id})" style="padding:.65rem;border-bottom:1px solid var(--bd);cursor:pointer;transition:background .2s" onmouseover="this.style.background='var(--sf2)'" onmouseout="this.style.background=''">
       <div style="display:flex;justify-content:space-between;align-items:center">
-        <span style="font-weight:700;font-size:.88rem">${c.username}${isMe?' (you)':''}</span>
+        <span style="font-weight:700;font-size:.88rem">${c.username}${isMe?' <span style=\\"color:var(--ok)\\">●</span>':''}</span>
         <span style="font-size:.68rem;font-family:monospace;color:var(--dim)">${new Date(c.checked_at+'Z').toLocaleTimeString()}</span>
       </div>
       ${c.label?`<div style="font-size:.72rem;color:var(--dim);margin-top:2px">📍 ${c.label}</div>`:''}
+      ${distTxt?`<div style="font-size:.72rem;color:var(--warn);margin-top:2px">📏 ${distTxt} away</div>`:''}
     </div>`;
   }).join('');
 }
@@ -502,7 +588,7 @@ body{{display:flex;align-items:center;justify-content:center;min-height:100vh}}
   <div class="brand-box">
     <div class="logo">📍</div>
     <div class="bname">Location<span>Track</span></div>
-    <div class="btag">Real-time location sharing & tracking</div>
+    <div class="btag">Real-time GPS tracking & sharing</div>
   </div>
   <div class="tabs">
     <button class="tb on" onclick="sw('login',this)">Sign In</button>
@@ -562,9 +648,9 @@ body{{overflow:hidden}}.page{{padding-top:58px;height:100vh;display:flex}}
 #dist-km{{font-size:1.5rem;font-weight:800;color:var(--warn);font-family:monospace}}
 .dp-x{{background:none;border:none;color:var(--dim);cursor:pointer;font-size:.72rem;margin-top:.35rem;display:block;text-align:right}}.dp-x:hover{{color:var(--err)}}
 .rld{{display:flex;justify-content:space-between;align-items:center;padding:.4rem .9rem;border-bottom:1px solid var(--bd)}}
-.ci-box{{display:flex;flex-direction:column;gap:.45rem}}
-#btn-ci{{width:100%;justify-content:center;font-size:.88rem;padding:.65rem}}
+.track-box{{display:flex;flex-direction:column;gap:.45rem}}
 #hist-list{{padding:0 .75rem;max-height:190px;overflow-y:auto}}
+.gps-status-row{{display:flex;align-items:center;justify-content:space-between;margin-bottom:.4rem}}
 @media(max-width:640px){{.sb{{width:220px;min-width:220px}}.rp{{display:none}}}}
 </style></head><body>
 <nav class="navbar">
@@ -578,9 +664,12 @@ body{{overflow:hidden}}.page{{padding-top:58px;height:100vh;display:flex}}
 </nav>
 <div class="page">
   <aside class="sb">
-    <div class="sb-top"><div class="ci-box">
-      <input id="ci-label" class="fi" type="text" placeholder="Label (Home, Work…)"/>
-      <button id="btn-ci" class="btn bs" onclick="doCheckin()">📍 Check In Here</button>
+    <div class="sb-top"><div class="track-box">
+      <div class="gps-status-row">
+        <span id="gps-pill" class="gps-pill searching"><span class="gps-dot"></span>Searching…</span>
+      </div>
+      <button id="btn-track" class="btn bp" style="width:100%;justify-content:center" onclick="toggleTracking()">▶ Start Tracking</button>
+      <button class="btn bo" style="width:100%;justify-content:center;font-size:.78rem" onclick="flyToMe()">🎯 Center on Me</button>
     </div></div>
     <div class="rld">
       <div class="sb-sec" style="border:none;padding:0">Online Users</div>
@@ -594,7 +683,8 @@ body{{overflow:hidden}}.page{{padding-top:58px;height:100vh;display:flex}}
   <aside class="rp">
     <div class="rp-top">📏 Distance Tool</div>
     <div style="padding:.7rem;font-size:.78rem;color:var(--dim);line-height:1.55">
-      Click <strong style="color:var(--ac)">Measure Distance</strong> on any user pin to calculate distance from your last check-in.
+      Start tracking to see live distance to each user.<br><br>
+      Click <strong style="color:var(--ac)">Measure Distance</strong> on any pin for exact calculation.
     </div>
     <div id="dist-panel">
       <div class="dp-t">📏 Estimated Distance</div>
@@ -617,7 +707,17 @@ body{{overflow:hidden}}.page{{padding-top:58px;height:100vh;display:flex}}
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>{JS_AUTH}{JS_MAP}
 requireAuth();initNav();initMap();loadLive();loadHistory();
-setInterval(loadLive,30000);
+// Auto-start tracking on page load
+startTracking();
+document.getElementById('btn-track').textContent='⏹ Stop Tracking';
+document.getElementById('btn-track').className='btn bd2';
+trackingActive=true;
+// Refresh other users every 10 seconds
+setInterval(loadLive, 10000);
+function flyToMe(){{
+  if(myLat!==null) map.flyTo([myLat,myLon],16,{{animate:true,duration:1.2}});
+  else toast('Location not available yet','e');
+}}
 function toggleHist(){{const e=document.getElementById('hist-list');e.style.display=e.style.display==='none'?'block':'none';}}
 function closeDist(){{document.getElementById('dist-panel').style.display='none';if(distLine){{map.removeLayer(distLine);distLine=null;}}}}
 async function manDist(){{
