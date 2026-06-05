@@ -348,14 +348,10 @@ const MIN_MOVE_M=10;
 
 function initMap(){
   map=L.map('map',{zoomControl:false}).setView([9.05,125.98],13);
-  // Satellite tiles (Esri World Imagery — free, no key needed)
-  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{
-    attribution:'Tiles © Esri &mdash; Source: Esri, Maxar, Earthstar Geographics',
+  // OpenStreetMap tiles — reliable worldwide coverage
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     maxZoom:19
-  }).addTo(map);
-  // Labels overlay on top of satellite
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png',{
-    attribution:'',maxZoom:19,pane:'shadowPane'
   }).addTo(map);
   L.control.zoom({position:'bottomright'}).addTo(map);
 }
@@ -409,31 +405,17 @@ function startTracking(){
   );
 }
 
-function stopTracking(){
-  if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;}
-  trackingActive=false;setGpsStatus('error','Stopped');
-}
 
-function toggleTracking(){
-  const btn=document.getElementById('btn-track');
-  if(trackingActive){
-    stopTracking();
-    btn.innerHTML='▶ Start Tracking';btn.className='btn bp';
-  }else{
-    startTracking();
-    btn.innerHTML='⏹ Stop Tracking';btn.className='btn bd2';
-    trackingActive=true;
-  }
-}
 
 function updateMyMarker(lat,lon){
   const me=Auth.user();if(!me)return;
-  if(markers[me.id])map.removeLayer(markers[me.id]);
-  markers[me.id]=L.marker([lat,lon],{icon:mkIcon('#10b981',me.username,true)}).addTo(map)
+  const myId=parseInt(me.id);
+  if(markers[myId])map.removeLayer(markers[myId]);
+  markers[myId]=L.marker([lat,lon],{icon:mkIcon('#10b981',me.username,true)}).addTo(map)
     .bindPopup(`<div style="padding:4px 2px">
       <div style="font-weight:700;font-size:.95rem;margin-bottom:4px">📍 ${me.username} <span style="color:#10b981;font-size:.75rem">(You)</span></div>
       <div style="font-size:.72rem;color:#64748b">${lat.toFixed(6)}, ${lon.toFixed(6)}</div>
-      <div style="margin-top:6px;font-size:.72rem;color:#10b981;font-weight:600">● Live tracking active</div>
+      <div style="margin-top:6px;font-size:.72rem;color:#10b981;font-weight:600">● Sharing location</div>
     </div>`);
 }
 
@@ -441,9 +423,10 @@ async function loadLive(){
   try{
     const cs=await Auth.req('GET','/api/checkins/live');
     const me=Auth.user();
-    Object.entries(markers).forEach(([uid,m])=>{if(parseInt(uid)!==me?.id)map.removeLayer(m);});
+    const myId=me?parseInt(me.id):null;
+    Object.entries(markers).forEach(([uid,m])=>{if(parseInt(uid)!==myId)map.removeLayer(m);});
     cs.forEach(c=>{
-      if(c.user_id===me?.id)return;
+      if(parseInt(c.user_id)===myId)return;
       const time=new Date(c.checked_at+'Z').toLocaleString();
       const distTxt=myLat!==null?fmtDist(hav(myLat,myLon,c.latitude,c.longitude)):'—';
       const m=L.marker([c.latitude,c.longitude],{icon:mkIcon('#0ea5e9',c.username)}).addTo(map)
@@ -466,7 +449,7 @@ async function loadLive(){
 }
 
 async function pickDist(lat,lon,name){
-  if(myLat===null){toast('Enable tracking first!','e');return;}
+  if(myLat===null){toast('Share your location first!','e');return;}
   await calcDist(myLat,myLon,lat,lon,'You',name);
 }
 async function calcDist(lat1,lon1,lat2,lon2,nA='A',nB='B'){
@@ -488,9 +471,10 @@ async function calcDist(lat1,lon1,lat2,lon2,nA='A',nB='B'){
 function updateUserList(cs){
   const el=document.getElementById('user-list');if(!el)return;
   const me=Auth.user();
+  const myId2=me?parseInt(me.id):null;
   if(!cs.length){el.innerHTML='<div style="padding:1rem;color:#94a3b8;font-size:.82rem;text-align:center">No users online yet</div>';return;}
   el.innerHTML=cs.map(c=>{
-    const isMe=c.user_id===me?.id;
+    const isMe=parseInt(c.user_id)===myId2;
     const distTxt=!isMe&&myLat!==null?fmtDist(hav(myLat,myLon,c.latitude,c.longitude)):'';
     return `<div onclick="flyTo(${c.user_id})" style="padding:.75rem 1rem;border-bottom:1px solid var(--bd);cursor:pointer;transition:background .15s;-webkit-tap-highlight-color:transparent" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background=''">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
@@ -502,7 +486,7 @@ function updateUserList(cs){
     </div>`;
   }).join('');
 }
-function flyTo(uid){const m=markers[uid];if(m){map.flyTo(m.getLatLng(),16,{animate:true,duration:1});m.openPopup();}}
+function flyTo(uid){const m=markers[parseInt(uid)];if(m){map.flyTo(m.getLatLng(),16,{animate:true,duration:1});m.openPopup();}}
 
 async function loadHistory(){
   const el=document.getElementById('hist-list');if(!el)return;
@@ -756,8 +740,7 @@ body{{overflow:hidden;position:fixed;width:100%;height:100%}}
     <div class="track-section">
       <div class="track-row">
         <span id="gps-pill" class="gps-pill searching"><span class="gps-dot"></span>Searching…</span>
-        <button id="btn-track" class="btn bp" style="flex:1;font-size:.8rem;padding:.48rem .7rem" onclick="toggleTracking()">▶ Start</button>
-        <button class="btn bo" style="padding:.48rem .7rem;font-size:.8rem" onclick="flyToMe()">🎯</button>
+        <button class="btn bo" style="padding:.48rem .7rem;font-size:.8rem" onclick="flyToMe()">🎯 Center</button>
       </div>
     </div>
     <!-- Tabs -->
@@ -794,7 +777,7 @@ body{{overflow:hidden;position:fixed;width:100%;height:100%}}
     <div id="map"></div>
     <!-- FAB buttons on map -->
     <div class="fab-group">
-      <button id="btn-track-fab" class="fab fab-start" onclick="toggleTracking()">▶ Start Tracking</button>
+      <button class="fab fab-center" onclick="flyToMe()">🎯 My Location</button>
     </div>
     <!-- Distance result floating -->
     <div class="dist-float" id="dist-panel">
@@ -810,22 +793,8 @@ body{{overflow:hidden;position:fixed;width:100%;height:100%}}
 <script>{JS_AUTH}{JS_MAP}
 requireAuth();initNav();initMap();loadLive();loadHistory();
 
-// sync both buttons
-const origToggle=toggleTracking;
-toggleTracking=function(){{
-  origToggle();
-  const fab=document.getElementById('btn-track-fab');
-  if(trackingActive){{fab.textContent='⏹ Stop Tracking';fab.className='fab fab-stop';}}
-  else{{fab.textContent='▶ Start Tracking';fab.className='fab fab-start';}}
-}};
-
-// Auto-start on load
+// Auto-start tracking on load
 startTracking();
-document.getElementById('btn-track').innerHTML='⏹ Stop';
-document.getElementById('btn-track').className='btn bd2';
-document.getElementById('btn-track-fab').textContent='⏹ Stop Tracking';
-document.getElementById('btn-track-fab').className='fab fab-stop';
-trackingActive=true;
 
 setInterval(loadLive,10000);
 
