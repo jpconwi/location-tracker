@@ -322,6 +322,7 @@ const Auth={
     if(Auth.token()) h['Authorization']='Bearer '+Auth.token();
     const r=await fetch(API+path,{method,headers:h,body:body?JSON.stringify(body):null});
     const d=await r.json();
+    if(r.status===401){Auth.logout();return;}
     if(!r.ok) throw new Error(d.detail||'Request failed');
     return d;
   }
@@ -390,12 +391,16 @@ function setGpsStatus(state,msg=''){
 
 async function pushLocation(lat,lon,label=null){
   try{
-    await Auth.req('POST','/api/checkins/',{latitude:lat,longitude:lon,label});
+    const res=await Auth.req('POST','/api/checkins/',{latitude:lat,longitude:lon,label});
+    if(!res)return;
     lastSentLat=lat;lastSentLon=lon;
     // Persist last known location so it survives page reload
     localStorage.setItem('lt_last_loc',JSON.stringify({lat,lon,ts:Date.now()}));
   }
-  catch(e){console.warn('Push failed:',e.message);}
+  catch(e){
+    console.warn('Push failed:',e.message);
+    toast('Location push failed: '+e.message,'e');
+  }
 }
 
 function startTracking(){
@@ -437,7 +442,8 @@ function updateMyMarker(lat,lon){
 
 async function loadLive(){
   try{
-    const cs=await Auth.req('GET','/api/checkins/live');
+    const cs=await Auth.req('GET','/api/checkins/all-users');
+    if(!cs||!Array.isArray(cs))return;
     const me=Auth.user();
     const myId=me?parseInt(me.id):null;
     // Remove all non-self markers (self marker managed by updateMyMarker via GPS watch)
@@ -829,10 +835,10 @@ requireAuth();initNav();initMap();loadLive();loadHistory();
       setGpsStatus('searching');
       // Push saved location to server so other users can see us right away
       await pushLocation(saved.lat,saved.lon);
-      // Reload the live map so everyone (including self) appears
-      await loadLive();
     }}
-  }}catch(e){{}}
+  }}catch(e){{console.warn('Restore failed:',e);}}
+  // Always reload live map on startup regardless of saved location
+  await loadLive();
 }})();
 
 // Auto-start tracking on load
@@ -974,6 +980,28 @@ async def checkin(body: CheckinCreate, user=Depends(current_user)):
 @app.get("/api/checkins/live")
 async def live(_u=Depends(current_user)):
     return await ctrl_live()
+
+@app.get("/api/checkins/all-users")
+async def all_users_live(_u=Depends(current_user)):
+    """Returns ALL registered users with their latest location (null if never checked in)"""
+    r = await q1("""
+        SELECT u.id, u.username,
+               c.latitude, c.longitude, c.label, c.checked_at
+        FROM users u
+        LEFT JOIN checkins c ON c.id = (
+            SELECT MAX(id) FROM checkins WHERE user_id = u.id
+        )
+        ORDER BY c.checked_at DESC NULLS LAST
+    """)
+    result = []
+    for x in r["rows"]:
+        if x[2] is not None:  # only include users who have a location
+            result.append({
+                "user_id": int(x[0]), "username": x[1],
+                "latitude": float(x[2]), "longitude": float(x[3]),
+                "label": x[4], "checked_at": x[5]
+            })
+    return result
 
 @app.get("/api/checkins/history")
 async def history(user=Depends(current_user)):
