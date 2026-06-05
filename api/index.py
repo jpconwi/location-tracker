@@ -85,13 +85,12 @@ async def init_db():
             is_admin INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now'))
         )"""},
-        {"q": """CREATE TABLE IF NOT EXISTS checkins (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+        {"q": """CREATE TABLE IF NOT EXISTS locations (
+            user_id INTEGER PRIMARY KEY,
             latitude REAL NOT NULL,
             longitude REAL NOT NULL,
             label TEXT,
-            checked_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (user_id) REFERENCES users(id)
         )"""},
     ])
@@ -107,7 +106,7 @@ class UserLogin(BaseModel):
     username: str
     password: str
 
-class CheckinCreate(BaseModel):
+class LocationUpdate(BaseModel):
     latitude:  float
     longitude: float
     label:     Optional[str] = None
@@ -164,48 +163,32 @@ async def ctrl_login(username, password):
     user = {"id": int(row[0]), "username": row[1], "is_admin": bool(int(row[3] or 0)), "created_at": row[4]}
     return {"access_token": make_token(user["id"]), "token_type": "bearer", "user": user}
 
-async def ctrl_checkin(user_id, lat, lon, label=None):
-    r = await q1("INSERT INTO checkins (user_id,latitude,longitude,label) VALUES (?,?,?,?)",
-                 [user_id, lat, lon, label])
-    cid = int(r["last_insert_rowid"])
-    cr = await q1("SELECT c.id,c.user_id,u.username,c.latitude,c.longitude,c.label,c.checked_at "
-                  "FROM checkins c JOIN users u ON c.user_id=u.id WHERE c.id=?", [cid])
-    row = cr["rows"][0]
-    return {"id": int(row[0]), "user_id": int(row[1]), "username": row[2],
-            "latitude": float(row[3]), "longitude": float(row[4]), "label": row[5], "checked_at": row[6]}
+async def ctrl_update_location(user_id, lat, lon, label=None):
+    await q1("""INSERT INTO locations (user_id,latitude,longitude,label,updated_at)
+                VALUES (?,?,?,?,datetime('now'))
+                ON CONFLICT(user_id) DO UPDATE SET
+                  latitude=excluded.latitude, longitude=excluded.longitude,
+                  label=excluded.label, updated_at=excluded.updated_at""",
+             [user_id, lat, lon, label])
+    ur = await q1("SELECT username FROM users WHERE id=?", [user_id])
+    username = ur["rows"][0][0] if ur["rows"] else "unknown"
+    return {"user_id": user_id, "username": username, "latitude": lat, "longitude": lon,
+            "label": label, "updated_at": "now"}
 
-async def ctrl_live():
-    r = await q1("""SELECT c.id,c.user_id,u.username,c.latitude,c.longitude,c.label,c.checked_at
-        FROM checkins c JOIN users u ON c.user_id=u.id
-        WHERE c.id IN (SELECT MAX(id) FROM checkins GROUP BY user_id)
-        ORDER BY c.checked_at DESC""")
-    return [{"id": int(x[0]), "user_id": int(x[1]), "username": x[2],
-             "latitude": float(x[3]), "longitude": float(x[4]), "label": x[5], "checked_at": x[6]} for x in r["rows"]]
-
-async def ctrl_history(uid):
-    r = await q1("SELECT c.id,c.user_id,u.username,c.latitude,c.longitude,c.label,c.checked_at "
-                 "FROM checkins c JOIN users u ON c.user_id=u.id "
-                 "WHERE c.user_id=? ORDER BY c.checked_at DESC LIMIT 20", [uid])
-    return [{"id": int(x[0]), "user_id": int(x[1]), "username": x[2],
-             "latitude": float(x[3]), "longitude": float(x[4]), "label": x[5], "checked_at": x[6]} for x in r["rows"]]
-
-async def ctrl_all_checkins():
-    r = await q1("SELECT c.id,c.user_id,u.username,c.latitude,c.longitude,c.label,c.checked_at "
-                 "FROM checkins c JOIN users u ON c.user_id=u.id ORDER BY c.checked_at DESC")
-    return [{"id": int(x[0]), "user_id": int(x[1]), "username": x[2],
-             "latitude": float(x[3]), "longitude": float(x[4]), "label": x[5], "checked_at": x[6]} for x in r["rows"]]
+async def ctrl_live_locations():
+    r = await q1("""SELECT l.user_id, u.username, l.latitude, l.longitude, l.label, l.updated_at
+                    FROM locations l JOIN users u ON l.user_id = u.id
+                    ORDER BY l.updated_at DESC""")
+    return [{"user_id": int(x[0]), "username": x[1],
+             "latitude": float(x[2]), "longitude": float(x[3]),
+             "label": x[4], "checked_at": x[5]} for x in r["rows"]]
 
 async def ctrl_list_users():
     r = await q1("SELECT id,username,is_admin,created_at FROM users ORDER BY created_at DESC")
     return [{"id": int(x[0]), "username": x[1], "is_admin": bool(int(x[2] or 0)), "created_at": x[3]} for x in r["rows"]]
 
 async def ctrl_del_user(uid):
-    await turso([{"q": "DELETE FROM checkins WHERE user_id=?", "params": [uid]},
-                 {"q": "DELETE FROM users WHERE id=?", "params": [uid]}])
-    return {"detail": "Deleted"}
-
-async def ctrl_del_checkin(cid):
-    await q1("DELETE FROM checkins WHERE id=?", [cid])
+    await q1("DELETE FROM users WHERE id=?", [uid])
     return {"detail": "Deleted"}
 
 def haversine(lat1, lon1, lat2, lon2):
@@ -391,10 +374,9 @@ function setGpsStatus(state,msg=''){
 
 async function pushLocation(lat,lon,label=null){
   try{
-    const res=await Auth.req('POST','/api/checkins/',{latitude:lat,longitude:lon,label});
+    const res=await Auth.req('POST','/api/location/update',{latitude:lat,longitude:lon,label});
     if(!res)return;
     lastSentLat=lat;lastSentLon=lon;
-    // Persist last known location so it survives page reload
     localStorage.setItem('lt_last_loc',JSON.stringify({lat,lon,ts:Date.now()}));
   }
   catch(e){
@@ -442,7 +424,7 @@ function updateMyMarker(lat,lon){
 
 async function loadLive(){
   try{
-    const cs=await Auth.req('GET','/api/checkins/all-users');
+    const cs=await Auth.req('GET','/api/location/live');
     if(!cs||!Array.isArray(cs))return;
     const me=Auth.user();
     const myId=me?parseInt(me.id):null;
@@ -481,7 +463,7 @@ async function pickDist(lat,lon,name){
 }
 async function calcDist(lat1,lon1,lat2,lon2,nA='A',nB='B'){
   try{
-    const r=await Auth.req('POST','/api/checkins/distance',{lat1,lon1,lat2,lon2});
+    const r=await Auth.req('POST','/api/location/distance',{lat1,lon1,lat2,lon2});
     if(distLine)map.removeLayer(distLine);
     distLine=L.polyline([[lat1,lon1],[lat2,lon2]],{color:'#f59e0b',weight:3,dashArray:'10,6',opacity:.9}).addTo(map);
     map.fitBounds([[lat1,lon1],[lat2,lon2]],{padding:[60,60]});
@@ -522,7 +504,7 @@ function flyTo(uid){const m=markers[parseInt(uid)];if(m){map.flyTo(m.getLatLng()
 async function loadHistory(){
   const el=document.getElementById('hist-list');if(!el)return;
   try{
-    const h=await Auth.req('GET','/api/checkins/history');
+    const h=await Auth.req('GET','/api/location/history');
     el.innerHTML=h.length?h.map(c=>`
       <div style="padding:.55rem .9rem;border-bottom:1px solid var(--bd);font-size:.77rem">
         <div style="display:flex;justify-content:space-between;gap:.5rem;flex-wrap:wrap">
@@ -550,37 +532,19 @@ async function loadUsers(){
     const el=document.getElementById('tot-users');if(el)el.textContent=us.length;
   }catch(e){tb.innerHTML=`<tr><td colspan="5" style="color:#dc2626">${e.message}</td></tr>`;}
 }
-async function loadCheckins(){
-  const tb=document.getElementById('cins-tb');if(!tb)return;
-  tb.innerHTML='<tr><td colspan="6" style="padding:1.2rem;color:#94a3b8">Loading…</td></tr>';
-  try{
-    const cs=await Auth.req('GET','/api/admin/checkins');
-    tb.innerHTML=cs.map(c=>`<tr>
-      <td>${c.id}</td><td><strong>${c.username}</strong></td>
-      <td style="font-size:.72rem">${c.latitude.toFixed(5)}, ${c.longitude.toFixed(5)}</td>
-      <td style="color:#64748b">${c.label||'—'}</td>
-      <td style="font-size:.72rem">${new Date(c.checked_at+'Z').toLocaleString()}</td>
-      <td><button class="btn bd2" onclick="delCin(${c.id})" style="padding:.25rem .6rem;font-size:.72rem">Delete</button></td>
-    </tr>`).join('');
-    const el=document.getElementById('tot-cins');if(el)el.textContent=cs.length;
-  }catch(e){tb.innerHTML=`<tr><td colspan="6" style="color:#dc2626">${e.message}</td></tr>`;}
-}
+
 async function delUser(id,name){
   if(!confirm(`Delete "${name}" and all their check-ins?`))return;
-  try{await Auth.req('DELETE',`/api/admin/users/${id}`);toast(`"${name}" deleted`,'s');loadUsers();loadCheckins();}
+  try{await Auth.req('DELETE',`/api/admin/users/${id}`);toast(`"${name}" deleted`,'s');loadUsers();}
   catch(e){toast('Failed: '+e.message,'e');}
 }
-async function delCin(id){
-  if(!confirm('Delete this check-in?'))return;
-  try{await Auth.req('DELETE',`/api/admin/checkins/${id}`);toast('Deleted','s');loadCheckins();}
-  catch(e){toast('Failed: '+e.message,'e');}
-}
+
 function switchTab(tab,btn){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('on'));
   document.querySelectorAll('.tab-pnl').forEach(p=>p.style.display='none');
   document.getElementById('tp-'+tab).style.display='block';
   btn.classList.add('on');
-  if(tab==='users')loadUsers();else loadCheckins();
+  if(tab==='users')loadUsers();
 }
 """
 
@@ -923,26 +887,19 @@ PAGE_ADMIN = f"""<!DOCTYPE html>
   <div id="adm-content">
     <div class="ah">
       <div><div class="at">Admin <span>Panel</span></div><div style="font-size:.78rem;color:var(--dim);margin-top:.2rem">System management</div></div>
-      <button class="btn bo" onclick="loadUsers();loadCheckins()">↻ Refresh</button>
+      <button class="btn bo" onclick="loadUsers()">↻ Refresh</button>
     </div>
     <div class="stats">
       <div class="sc"><div class="sl">Total Users</div><div class="sv" id="tot-users">—</div></div>
-      <div class="sc"><div class="sl">Check-ins</div><div class="sv" id="tot-cins">—</div></div>
       <div class="sc"><div class="sl">Admin</div><div class="sv" id="adm-name" style="font-size:.95rem;padding-top:.35rem">—</div></div>
     </div>
     <div class="tabs">
       <button class="tab-btn on" onclick="switchTab('users',this)">👥 Users</button>
-      <button class="tab-btn" onclick="switchTab('checkins',this)">📍 Check-ins</button>
     </div>
     <div id="tp-users" class="tw tab-pnl">
       <div class="tt"><h3>All Users</h3><button class="btn bo" onclick="loadUsers()" style="padding:.25rem .6rem;font-size:.72rem">↻</button></div>
       <div class="tsc"><table class="dt"><thead><tr><th>ID</th><th>Username</th><th>Role</th><th>Registered</th><th></th></tr></thead>
       <tbody id="users-tb"></tbody></table></div>
-    </div>
-    <div id="tp-checkins" class="tw tab-pnl" style="display:none">
-      <div class="tt"><h3>All Check-ins</h3><button class="btn bo" onclick="loadCheckins()" style="padding:.25rem .6rem;font-size:.72rem">↻</button></div>
-      <div class="tsc"><table class="dt"><thead><tr><th>ID</th><th>User</th><th>Coordinates</th><th>Label</th><th>Time</th><th></th></tr></thead>
-      <tbody id="cins-tb"></tbody></table></div>
     </div>
   </div>
 </div>
@@ -950,7 +907,7 @@ PAGE_ADMIN = f"""<!DOCTYPE html>
 requireAuth();initNav();
 const u=Auth.user();
 if(!u?.is_admin){{document.getElementById('adm-content').style.display='none';document.getElementById('acc-denied').style.display='block';}}
-else{{document.getElementById('adm-name').textContent=u.username;loadUsers();loadCheckins();}}
+else{{document.getElementById('adm-name').textContent=u.username;loadUsers();}}
 </script></body></html>"""
 
 # ═══════════════════════════════════════════════════
@@ -973,42 +930,25 @@ async def register(body: UserCreate, admin_code: str = ""):
 async def login(body: UserLogin):
     return await ctrl_login(body.username, body.password)
 
-@app.post("/api/checkins/")
-async def checkin(body: CheckinCreate, user=Depends(current_user)):
-    return await ctrl_checkin(user["id"], body.latitude, body.longitude, body.label)
+@app.post("/api/location/update")
+async def location_update(body: LocationUpdate, user=Depends(current_user)):
+    return await ctrl_update_location(user["id"], body.latitude, body.longitude, body.label)
 
-@app.get("/api/checkins/live")
-async def live(_u=Depends(current_user)):
-    return await ctrl_live()
+@app.get("/api/location/live")
+async def location_live(_u=Depends(current_user)):
+    return await ctrl_live_locations()
 
-@app.get("/api/checkins/all-users")
-async def all_users_live(_u=Depends(current_user)):
-    """Returns ALL registered users with their latest location (null if never checked in)"""
-    r = await q1("""
-        SELECT u.id, u.username,
-               c.latitude, c.longitude, c.label, c.checked_at
-        FROM users u
-        LEFT JOIN checkins c ON c.id = (
-            SELECT MAX(id) FROM checkins WHERE user_id = u.id
-        )
-        ORDER BY c.checked_at DESC NULLS LAST
-    """)
-    result = []
-    for x in r["rows"]:
-        if x[2] is not None:  # only include users who have a location
-            result.append({
-                "user_id": int(x[0]), "username": x[1],
-                "latitude": float(x[2]), "longitude": float(x[3]),
-                "label": x[4], "checked_at": x[5]
-            })
-    return result
+@app.get("/api/location/history")
+async def location_history(user=Depends(current_user)):
+    r = await q1("""SELECT l.user_id, u.username, l.latitude, l.longitude, l.label, l.updated_at
+                    FROM locations l JOIN users u ON l.user_id = u.id
+                    WHERE l.user_id=?""", [user["id"]])
+    return [{"user_id": int(x[0]), "username": x[1],
+             "latitude": float(x[2]), "longitude": float(x[3]),
+             "label": x[4], "checked_at": x[5]} for x in r["rows"]]
 
-@app.get("/api/checkins/history")
-async def history(user=Depends(current_user)):
-    return await ctrl_history(user["id"])
-
-@app.post("/api/checkins/distance")
-async def distance(body: DistanceRequest, _u=Depends(current_user)):
+@app.post("/api/location/distance")
+async def location_distance(body: DistanceRequest, _u=Depends(current_user)):
     return haversine(body.lat1, body.lon1, body.lat2, body.lon2)
 
 @app.get("/api/admin/users")
@@ -1019,13 +959,6 @@ async def adm_users(_a=Depends(admin_only)):
 async def adm_del_user(uid: int, _a=Depends(admin_only)):
     return await ctrl_del_user(uid)
 
-@app.get("/api/admin/checkins")
-async def adm_checkins(_a=Depends(admin_only)):
-    return await ctrl_all_checkins()
-
-@app.delete("/api/admin/checkins/{cid}")
-async def adm_del_checkin(cid: int, _a=Depends(admin_only)):
-    return await ctrl_del_checkin(cid)
 
 @app.get("/",      response_class=HTMLResponse)
 async def pg_index(): return HTMLResponse(PAGE_INDEX)
