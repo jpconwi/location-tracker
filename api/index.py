@@ -404,11 +404,16 @@ function startTracking(){
   watchId=navigator.geolocation.watchPosition(
     async pos=>{
       const{latitude:lat,longitude:lon}=pos.coords;
+      const wasFirst=lastSentLat===null;
       myLat=lat;myLon=lon;trackingActive=true;
       setGpsStatus('active');
       updateMyMarker(lat,lon);
-      const moved=lastSentLat===null||hav(lastSentLat,lastSentLon,lat,lon)>=MIN_MOVE_M;
-      if(moved) await pushLocation(lat,lon);
+      const moved=wasFirst||hav(lastSentLat,lastSentLon,lat,lon)>=MIN_MOVE_M;
+      if(moved){
+        await pushLocation(lat,lon);
+        // After first fix or significant move, refresh the live map
+        await loadLive();
+      }
     },
     err=>{setGpsStatus('error',err.code===1?'Denied':'Unavailable');toast('GPS: '+err.message,'e');},
     {enableHighAccuracy:true,maximumAge:3000,timeout:15000}
@@ -488,7 +493,7 @@ function updateUserList(cs){
   const el=document.getElementById('user-list');if(!el)return;
   const me=Auth.user();
   const myId2=me?parseInt(me.id):null;
-  if(!cs.length){el.innerHTML='<div style="padding:1rem;color:#94a3b8;font-size:.82rem;text-align:center">No users online yet</div>';return;}
+  if(!cs.length){el.innerHTML='<div style="padding:1rem;color:#94a3b8;font-size:.82rem;text-align:center">📡 Waiting for users to share location…</div>';return;}
   el.innerHTML=cs.map(c=>{
     const isMe=parseInt(c.user_id)===myId2;
     const distTxt=!isMe&&myLat!==null?fmtDist(hav(myLat,myLon,c.latitude,c.longitude)):'';
@@ -813,8 +818,8 @@ body{{overflow:hidden;position:fixed;width:100%;height:100%}}
 <script>{JS_AUTH}{JS_MAP}
 requireAuth();initNav();initMap();loadLive();loadHistory();
 
-// Restore last known position immediately so marker shows before GPS fires
-(function restoreLastLocation(){{
+// Restore last known position AND push to server so we appear for others immediately
+(async function restoreLastLocation(){{
   try{{
     const saved=JSON.parse(localStorage.getItem('lt_last_loc')||'null');
     if(saved&&saved.lat&&saved.lon){{
@@ -822,6 +827,10 @@ requireAuth();initNav();initMap();loadLive();loadHistory();
       updateMyMarker(saved.lat,saved.lon);
       map.setView([saved.lat,saved.lon],15);
       setGpsStatus('searching');
+      // Push saved location to server so other users can see us right away
+      await pushLocation(saved.lat,saved.lon);
+      // Reload the live map so everyone (including self) appears
+      await loadLive();
     }}
   }}catch(e){{}}
 }})();
