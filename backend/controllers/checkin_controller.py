@@ -22,7 +22,7 @@ async def create_checkin(user_id: int, latitude: float, longitude: float, label:
         result = await client.execute(
             "INSERT INTO checkins (user_id, latitude, longitude, label) VALUES (?, ?, ?, ?) "
             "RETURNING id, user_id, latitude, longitude, label, checked_at",
-            [user_id, latitude, longitude, label]
+            [int(user_id), float(latitude), float(longitude), label]
         )
         row = result.rows[0]
         # fetch username
@@ -93,5 +93,5 @@ async def delete_checkin(checkin_id: int):
 
 
 def calc_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> dict:
-    km = haversine_km(lat1, lon1, lat2, lon2)
+    km = haversine_km(float(lat1), float(lon1), float(lat2), float(lon2))
     return {"km": round(km, 3), "meters": round(km * 1000, 1)}
