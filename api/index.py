@@ -348,10 +348,15 @@ const MIN_MOVE_M=10;
 
 function initMap(){
   map=L.map('map',{zoomControl:false}).setView([9.05,125.98],13);
-  // OpenStreetMap tiles — reliable worldwide coverage
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-    attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    maxZoom:19
+  // Esri satellite with maxNativeZoom cap to avoid blank tiles
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{
+    attribution:'Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics',
+    maxZoom:20,
+    maxNativeZoom:18
+  }).addTo(map);
+  // Labels overlay so streets/places are visible on satellite
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png',{
+    attribution:'',maxZoom:20,maxNativeZoom:18,opacity:0.9
   }).addTo(map);
   L.control.zoom({position:'bottomright'}).addTo(map);
 }
@@ -384,7 +389,12 @@ function setGpsStatus(state,msg=''){
 }
 
 async function pushLocation(lat,lon,label=null){
-  try{await Auth.req('POST','/api/checkins/',{latitude:lat,longitude:lon,label});lastSentLat=lat;lastSentLon=lon;}
+  try{
+    await Auth.req('POST','/api/checkins/',{latitude:lat,longitude:lon,label});
+    lastSentLat=lat;lastSentLon=lon;
+    // Persist last known location so it survives page reload
+    localStorage.setItem('lt_last_loc',JSON.stringify({lat,lon,ts:Date.now()}));
+  }
   catch(e){console.warn('Push failed:',e.message);}
 }
 
@@ -410,6 +420,7 @@ function startTracking(){
 function updateMyMarker(lat,lon){
   const me=Auth.user();if(!me)return;
   const myId=parseInt(me.id);
+  myLat=lat;myLon=lon;
   if(markers[myId])map.removeLayer(markers[myId]);
   markers[myId]=L.marker([lat,lon],{icon:mkIcon('#10b981',me.username,true)}).addTo(map)
     .bindPopup(`<div style="padding:4px 2px">
@@ -424,25 +435,30 @@ async function loadLive(){
     const cs=await Auth.req('GET','/api/checkins/live');
     const me=Auth.user();
     const myId=me?parseInt(me.id):null;
-    Object.entries(markers).forEach(([uid,m])=>{if(parseInt(uid)!==myId)map.removeLayer(m);});
+    // Remove all non-self markers (self marker managed by updateMyMarker via GPS watch)
+    Object.entries(markers).forEach(([uid,m])=>{if(parseInt(uid)!==myId){map.removeLayer(m);delete markers[parseInt(uid)];}});
     cs.forEach(c=>{
-      if(parseInt(c.user_id)===myId)return;
+      const isMe=parseInt(c.user_id)===myId;
       const time=new Date(c.checked_at+'Z').toLocaleString();
-      const distTxt=myLat!==null?fmtDist(hav(myLat,myLon,c.latitude,c.longitude)):'—';
-      const m=L.marker([c.latitude,c.longitude],{icon:mkIcon('#0ea5e9',c.username)}).addTo(map)
+      const distTxt=(!isMe&&myLat!==null)?fmtDist(hav(myLat,myLon,c.latitude,c.longitude)):'';
+      // Green pulsing = you, Orange = others
+      const color=isMe?'#10b981':'#f97316';
+      const uid=parseInt(c.user_id);
+      if(markers[uid])map.removeLayer(markers[uid]);
+      const m=L.marker([c.latitude,c.longitude],{icon:mkIcon(color,c.username,isMe)}).addTo(map)
         .bindPopup(`<div style="padding:4px 2px;min-width:170px">
-          <div style="font-weight:700;font-size:.95rem;margin-bottom:4px">${c.username}</div>
+          <div style="font-weight:700;font-size:.95rem;margin-bottom:4px">${c.username}${isMe?' <span style="color:#10b981;font-size:.72rem">(You)</span>':''}</div>
           ${c.label?`<div style="font-size:.78rem;color:#64748b;margin-bottom:4px">📍 ${c.label}</div>`:''}
           <div style="font-size:.7rem;color:#94a3b8;margin-bottom:6px">${time}</div>
-          <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:5px 8px;margin-bottom:8px;text-align:center">
-            <span style="font-size:.7rem;color:#0284c7">Distance from you</span><br>
-            <span style="font-size:1.1rem;font-weight:800;color:#0ea5e9">${distTxt}</span>
-          </div>
-          <button onclick="pickDist(${c.latitude},${c.longitude},'${c.username}')"
-            style="width:100%;padding:5px;background:#0ea5e9;color:#fff;border:none;border-radius:7px;font-size:.75rem;font-weight:600;cursor:pointer">
-            📏 Measure Distance</button>
+          ${!isMe&&distTxt?`<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:5px 8px;margin-bottom:8px;text-align:center">
+            <span style="font-size:.7rem;color:#c2410c">Distance from you</span><br>
+            <span style="font-size:1.1rem;font-weight:800;color:#f97316">${distTxt}</span>
+          </div>`:''}
+          ${!isMe?`<button onclick="pickDist(${c.latitude},${c.longitude},'${c.username}')"
+            style="width:100%;padding:5px;background:#f97316;color:#fff;border:none;border-radius:7px;font-size:.75rem;font-weight:600;cursor:pointer">
+            📏 Measure Distance</button>`:''}
         </div>`);
-      markers[c.user_id]=m;
+      markers[uid]=m;
     });
     updateUserList(cs);
   }catch(e){toast('Refresh failed: '+e.message,'e');}
@@ -476,13 +492,17 @@ function updateUserList(cs){
   el.innerHTML=cs.map(c=>{
     const isMe=parseInt(c.user_id)===myId2;
     const distTxt=!isMe&&myLat!==null?fmtDist(hav(myLat,myLon,c.latitude,c.longitude)):'';
+    const dotColor=isMe?'#10b981':'#f97316';
     return `<div onclick="flyTo(${c.user_id})" style="padding:.75rem 1rem;border-bottom:1px solid var(--bd);cursor:pointer;transition:background .15s;-webkit-tap-highlight-color:transparent" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background=''">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
-        <span style="font-weight:700;font-size:.88rem;color:var(--tx)">${c.username}${isMe?' <span style="color:#10b981;font-size:.7rem">● You</span>':''}</span>
+        <span style="font-weight:700;font-size:.88rem;color:var(--tx)">
+          <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${dotColor};margin-right:5px;vertical-align:middle"></span>
+          ${c.username}${isMe?' <span style="color:#10b981;font-size:.7rem">(You)</span>':''}
+        </span>
         <span style="font-size:.68rem;color:var(--dim2)">${new Date(c.checked_at+'Z').toLocaleTimeString()}</span>
       </div>
       ${c.label?`<div style="font-size:.72rem;color:var(--dim);margin-top:1px">📍 ${c.label}</div>`:''}
-      ${distTxt?`<div style="font-size:.74rem;color:#0ea5e9;font-weight:600;margin-top:3px">📏 ${distTxt} away</div>`:''}
+      ${distTxt?`<div style="font-size:.74rem;color:#f97316;font-weight:600;margin-top:3px">📏 ${distTxt} away</div>`:''}
     </div>`;
   }).join('');
 }
@@ -792,6 +812,19 @@ body{{overflow:hidden;position:fixed;width:100%;height:100%}}
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>{JS_AUTH}{JS_MAP}
 requireAuth();initNav();initMap();loadLive();loadHistory();
+
+// Restore last known position immediately so marker shows before GPS fires
+(function restoreLastLocation(){{
+  try{{
+    const saved=JSON.parse(localStorage.getItem('lt_last_loc')||'null');
+    if(saved&&saved.lat&&saved.lon){{
+      myLat=saved.lat;myLon=saved.lon;
+      updateMyMarker(saved.lat,saved.lon);
+      map.setView([saved.lat,saved.lon],15);
+      setGpsStatus('searching');
+    }}
+  }}catch(e){{}}
+}})();
 
 // Auto-start tracking on load
 startTracking();
